@@ -59,6 +59,27 @@ type Result struct {
 	// Truncation records what (if anything) was dropped. The zero value means
 	// nothing was lost — the Text is a complete, faithful view.
 	Truncation Truncation
+
+	// Records carries structured output when a structured stage (a log spec)
+	// produced it: one entry per surviving line, with its level and parsed
+	// fields. nil for text-only filters. This is the "structured data out" path
+	// — a caller can route records to a logger or consume fields directly
+	// instead of (or alongside) reading Text.
+	Records []Record
+}
+
+// Record is one parsed line of structured output: a canonical severity level,
+// the named fields extracted from it, and the rendered text. Produced by log
+// specs and reusable by streaming consumers (see LogParser).
+type Record struct {
+	// Level is the canonical severity: debug|info|warn|error|fatal (or "" when
+	// the line carries no level).
+	Level string
+	// Fields are the named captures / parsed values for the line. Always
+	// includes "msg" (the message) and "level".
+	Fields map[string]any
+	// Text is the rendered line (per the spec's template).
+	Text string
 }
 
 // Lossless reports whether the Result preserved everything (nothing dropped or

@@ -39,6 +39,7 @@ type Spec struct {
 
 	JSON      *JSONSpec  `json:"json,omitempty"`
 	Lines     *LineSpec  `json:"lines,omitempty"`
+	Log       *LogSpec   `json:"log,omitempty"` // parse a log stream into levelled Records
 	Limit     *LimitSpec `json:"limit,omitempty"`
 	EmptyText string     `json:"empty_text,omitempty"` // text to emit when nothing survives
 }
@@ -155,8 +156,8 @@ func (s Spec) Compile() (Filter, error) {
 	if s.Match.Command == "" && s.Match.CommandRegex == "" {
 		return nil, fmt.Errorf("gortk: spec %q needs match.command or match.command_regex", s.Name)
 	}
-	if s.JSON == nil && s.Lines == nil && len(s.MatchOutput) == 0 {
-		return nil, fmt.Errorf("gortk: spec %q has no transform (json, lines, or match_output)", s.Name)
+	if s.JSON == nil && s.Lines == nil && s.Log == nil && len(s.MatchOutput) == 0 {
+		return nil, fmt.Errorf("gortk: spec %q has no transform (json, lines, log, or match_output)", s.Name)
 	}
 	f := &specFilter{spec: s}
 	if s.Match.CommandRegex != "" {
@@ -182,6 +183,13 @@ func (s Spec) Compile() (Filter, error) {
 			}
 		}
 		f.matchOut = append(f.matchOut, cr)
+	}
+	if s.Log != nil {
+		lp, err := s.Log.Compile()
+		if err != nil {
+			return nil, fmt.Errorf("gortk: spec %q: %w", s.Name, err)
+		}
+		f.logParser = lp
 	}
 	if s.JSON != nil {
 		// array_field may be empty (whole document is the array); item_template
@@ -231,6 +239,7 @@ type specFilter struct {
 	matchOut    []compiledOutRule
 	itemTmpl    *template.Template // non-nil when ItemTemplate is a Go template
 	summaryTmpl *template.Template // non-nil when SummaryTemplate is a Go template
+	logParser   *LogParser         // non-nil when the spec has a log block
 }
 
 type compiledOutRule struct {
@@ -266,6 +275,9 @@ func (f *specFilter) Match(name string, args []string) bool {
 func (f *specFilter) Apply(cmd Command) Result {
 	if res, ok := f.applyMatchOutput(cmd); ok {
 		return res
+	}
+	if f.logParser != nil {
+		return f.applyLog(cmd)
 	}
 	if f.spec.JSON != nil {
 		if res, ok := f.applyJSON(cmd); ok {

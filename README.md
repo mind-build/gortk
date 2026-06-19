@@ -168,10 +168,11 @@ A `Spec` is JSON and runs as an ordered pipeline (mirrors rtk's stages):
 1. `match_output` — whole-blob regex → one-line message, with an `unless` guard
    so errors are never hidden behind an "ok" (rtk's highest-leverage stage).
 2. `json` — flatten a JSON array to one templated line per element.
-3. `lines` — `strip_ansi`, `trim_space`, `drop_blank`, `dedup_adjacent`,
-   `drop_prefixes`, `drop_regexps`, `keep_regexps` (keep overrides drop).
-4. `limit` — `max_lines` head/tail cap.
-5. `empty_text` — message when nothing survives.
+3. `log` — parse a log stream into levelled `Records` (see below).
+4. `lines` — `strip_ansi`, `trim_space`, `drop_blank`, `dedup_adjacent`,
+   `drop_prefixes`, `drop_regexps`, `keep_regexps` (whitelist).
+5. `limit` — `max_lines` head/tail cap.
+6. `empty_text` — message when nothing survives.
 
 Example (`git push` → one line unless it failed):
 
@@ -191,6 +192,34 @@ Load and register at runtime:
 specs, _ := gortk.LoadSpecs(jsonBytes)
 reg := gortk.Default()
 for _, s := range specs { _ = reg.RegisterSpec(s) }
+```
+
+### Log parsing → structured `Records`
+
+The `log` stage parses a log stream: a named-capture regex extracts fields per
+line, `level_map` normalizes severities, `demote_patterns` drop routine noise to
+`debug`, `min_level` filters, and `template` renders each kept line. It produces
+**structured `Records`** (`{Level, Fields, Text}`) on the `Result`, not just
+compressed text — so a caller can route by level or read fields directly.
+
+It's deliberately *parse → route → render*, not a query language: no
+expressions, no aggregation. That's where the "swiss-army" line is drawn.
+
+The compiled form, `LogParser`, parses **one line at a time**, so the same spec
+serves batch compression *and* streaming consumers (e.g. postgres' log writer
+routing each line to a logger at its level — no buffering):
+
+```go
+p, _ := gortk.LogSpec{
+    LineRegex: `^\S+ \S+ \S+ \[(?P<pid>\d+)\] (?P<level>\w+):\s*(?P<msg>.*)$`,
+    LevelMap:  map[string]string{"LOG": "info", "FATAL": "fatal", "WARNING": "warn"},
+    DemotePatterns: []string{`^checkpoint (starting|complete)`},
+}.Compile()
+
+for line := range stream {              // streaming, line by line
+    rec := p.Parse(line)                // -> {Level, Fields{pid,msg,...}, Text}
+    logger.At(rec.Level, rec.Fields["msg"])
+}
 ```
 
 ## Design

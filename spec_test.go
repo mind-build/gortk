@@ -279,11 +279,31 @@ func TestStripANSI(t *testing.T) {
 }
 
 func TestStripANSIUnitHelper(t *testing.T) {
-	if got := stripANSI("plain"); got != "plain" {
+	if got := StripANSI("plain"); got != "plain" {
 		t.Errorf("plain text changed: %q", got)
 	}
-	if got := stripANSI("\x1b[33mwarn\x1b[0m"); got != "warn" {
+	if got := StripANSI("\x1b[33mwarn\x1b[0m"); got != "warn" {
 		t.Errorf("color codes not stripped: %q", got)
+	}
+}
+
+func TestStripANSIFullControlSet(t *testing.T) {
+	esc := "\x1b"
+	cases := map[string]string{
+		"a" + esc + "[2Jb":                 "ab",  // CSI cursor/erase
+		esc + "[?1049h" + "x":              "x",   // alt-screen (CSI ?)
+		esc + "[1;40r" + "x":               "x",   // scroll region
+		esc + "[6n":                        "",    // DSR query
+		esc + "]0;title" + "\x07" + "x":    "x",   // OSC BEL-terminated
+		esc + "]11;?" + esc + "\\" + "x":   "x",   // OSC ST-terminated
+		esc + "(B" + "x":                   "x",   // charset designation
+		esc + "=" + "y":                    "y",   // keypad mode
+		esc + "[32mok" + esc + "[6n" + "!": "ok!", // color kept-stripped + DSR removed
+	}
+	for in, want := range cases {
+		if got := StripANSI(in); got != want {
+			t.Errorf("StripANSI(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

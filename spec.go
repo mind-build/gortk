@@ -381,7 +381,7 @@ func (f *specFilter) applyLines(cmd Command) Result {
 	for _, line := range lines {
 		v := line
 		if ls.StripANSI {
-			v = stripANSI(v)
+			v = StripANSI(v)
 		}
 		if ls.TrimSpace {
 			v = strings.TrimSpace(v)
@@ -567,8 +567,14 @@ func resolvePath(v any, path string) (any, bool) {
 	return cur, true
 }
 
-// ansiPattern matches CSI/OSC ANSI escape sequences (colors, cursor moves).
-var ansiPattern = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07]*\x07")
+// ansiPattern matches terminal control sequences: CSI (colors, cursor moves,
+// alt-screen, scroll region, DSR), OSC (BEL- or ST-terminated), charset
+// designation, and the common 2-char ESC escapes.
+var ansiPattern = regexp.MustCompile(
+	`\x1b\[[0-9;?]*[ -/]*[@-~]` + // CSI ... final byte
+		`|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)` + // OSC, BEL- or ST-terminated
+		`|\x1b[()*+#][0-9A-Za-z]` + // charset designation, e.g. ESC ( B
+		`|\x1b[=>78cMDEHNOno<]`) // keypad/cursor/reset & other Fe/Fs escapes
 
 // truncateRunes caps s to n runes, appending "…" when it had to cut.
 func truncateRunes(s string, n int) string {
@@ -582,7 +588,11 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-func stripANSI(s string) string {
+// StripANSI removes terminal control sequences (ANSI/VT) from s — CSI, OSC
+// (BEL- or ST-terminated), charset designation, and 2-char ESC escapes. Exported
+// as the one canonical sanitizer so log forwarders and other packages don't
+// hand-roll their own. Returns s unchanged when it contains no ESC.
+func StripANSI(s string) string {
 	if !strings.ContainsRune(s, '\x1b') {
 		return s
 	}

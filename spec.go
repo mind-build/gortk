@@ -567,15 +567,6 @@ func resolvePath(v any, path string) (any, bool) {
 	return cur, true
 }
 
-// ansiPattern matches terminal control sequences: CSI (colors, cursor moves,
-// alt-screen, scroll region, DSR), OSC (BEL- or ST-terminated), charset
-// designation, and the common 2-char ESC escapes.
-var ansiPattern = regexp.MustCompile(
-	`\x1b\[[0-9;?]*[ -/]*[@-~]` + // CSI ... final byte
-		`|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)` + // OSC, BEL- or ST-terminated
-		`|\x1b[()*+#][0-9A-Za-z]` + // charset designation, e.g. ESC ( B
-		`|\x1b[=>78cMDEHNOno<]`) // keypad/cursor/reset & other Fe/Fs escapes
-
 // truncateRunes caps s to n runes, appending "…" when it had to cut.
 func truncateRunes(s string, n int) string {
 	if n <= 0 {
@@ -588,35 +579,86 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// StripANSI removes terminal control sequences (ANSI/VT) from s — CSI, OSC
-// (BEL- or ST-terminated), charset designation, and 2-char ESC escapes,
-// INCLUDING SGR color codes. Use for LLM/text contexts where colors are noise.
-// Exported as the one canonical sanitizer so other packages don't hand-roll
-// their own. Returns s unchanged when it contains no ESC.
-func StripANSI(s string) string {
-	if !strings.ContainsRune(s, '\x1b') {
+// StripANSI removes ALL terminal control sequences from s, including SGR color
+// codes. Use for LLM/text contexts where colors are noise. The one canonical
+// sanitizer — other packages share it rather than hand-rolling their own.
+func StripANSI(s string) string { return stripTerminal(s, false) }
+
+// StripControl removes cursor/OSC/charset/DCS/2-char control sequences and bare
+// CR/BEL, but KEEPS SGR color codes (\x1b[…m). Use when forwarding logs to a
+// human terminal: control sequences garble layout, but colors are useful.
+func StripControl(s string) string { return stripTerminal(s, true) }
+
+// stripTerminal removes terminal control sequences byte-wise. When keepColor is
+// true, SGR sequences (CSI … 'm') are preserved. Handles CSI, OSC (BEL/ST),
+// DCS/SOS/PM/APC (ST), charset designation, 2-byte escapes, and bare CR/BEL.
+// Callers pass one line at a time — an escape never spans a newline in
+// line-oriented output.
+func stripTerminal(s string, keepColor bool) string {
+	if !strings.ContainsRune(s, '\x1b') && !strings.ContainsAny(s, "\r\x07") {
 		return s
 	}
-	return ansiPattern.ReplaceAllString(s, "")
-}
-
-// controlPattern is ansiPattern minus SGR: its CSI branch excludes the 'm'
-// final byte (0x6d), so color codes survive.
-var controlPattern = regexp.MustCompile(
-	`\x1b\[[0-9;?]*[ -/]*[@-ln-~]` + // CSI with a non-SGR final byte (excludes 'm')
-		`|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)` + // OSC
-		`|\x1b[()*+#][0-9A-Za-z]` + // charset designation
-		`|\x1b[=>78cMDEHNOno<]`) // 2-char escapes
-
-// StripControl removes cursor/OSC/charset/2-char control sequences but KEEPS
-// SGR color codes (\x1b[…m). Use when forwarding logs to a human terminal: the
-// control sequences garble layout, but colors are useful. (StripANSI removes
-// colors too.)
-func StripControl(s string) string {
-	if !strings.ContainsRune(s, '\x1b') {
-		return s
+	b := []byte(s)
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		c := b[i]
+		if c == 0x1b { // ESC
+			if i+1 >= len(b) {
+				break // dangling ESC — drop
+			}
+			switch b[i+1] {
+			case '[': // CSI: params … final byte 0x40–0x7e
+				j := i + 2
+				for j < len(b) && (b[j] < 0x40 || b[j] > 0x7e) {
+					j++
+				}
+				if j >= len(b) {
+					i = len(b) // unterminated — drop the rest
+					continue
+				}
+				if keepColor && b[j] == 'm' { // SGR — keep
+					out = append(out, b[i:j+1]...)
+				}
+				i = j + 1
+			case ']': // OSC: BEL- or ST-terminated — drop
+				j := i + 2
+				for j < len(b) {
+					if b[j] == 0x07 {
+						j++
+						break
+					}
+					if b[j] == 0x1b && j+1 < len(b) && b[j+1] == '\\' {
+						j += 2
+						break
+					}
+					j++
+				}
+				i = j
+			case 'P', 'X', '^', '_': // DCS/SOS/PM/APC: ST-terminated — drop
+				j := i + 2
+				for j < len(b) {
+					if b[j] == 0x1b && j+1 < len(b) && b[j+1] == '\\' {
+						j += 2
+						break
+					}
+					j++
+				}
+				i = j
+			case '(', ')', '*', '+': // charset designation — drop 3 bytes
+				i += 3
+			default: // other 2-byte escape — drop
+				i += 2
+			}
+			continue
+		}
+		if c == '\r' || c == 0x07 { // bare CR / BEL — drop
+			i++
+			continue
+		}
+		out = append(out, c)
+		i++
 	}
-	return controlPattern.ReplaceAllString(s, "")
+	return string(out)
 }
 
 func formatValue(v any) string {

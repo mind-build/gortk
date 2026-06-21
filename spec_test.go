@@ -307,6 +307,20 @@ func TestStripANSIFullControlSet(t *testing.T) {
 	}
 }
 
+func TestStripControlKeepsColor(t *testing.T) {
+	esc := "\x1b"
+	// Control sequences stripped; SGR color codes kept.
+	in := esc + "[?1049h" + esc + "[32m" + "ok" + esc + "[6n" + esc + "[0m" + "!"
+	want := esc + "[32m" + "ok" + esc + "[0m" + "!"
+	if got := StripControl(in); got != want {
+		t.Errorf("StripControl kept-color = %q, want %q", got, want)
+	}
+	// StripANSI removes the colors too.
+	if got := StripANSI(in); got != "ok!" {
+		t.Errorf("StripANSI = %q, want %q", got, "ok!")
+	}
+}
+
 // --- match_output (whole-blob collapse) -------------------------------------
 
 func TestMatchOutputCollapses(t *testing.T) {

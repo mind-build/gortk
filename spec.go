@@ -589,14 +589,34 @@ func truncateRunes(s string, n int) string {
 }
 
 // StripANSI removes terminal control sequences (ANSI/VT) from s — CSI, OSC
-// (BEL- or ST-terminated), charset designation, and 2-char ESC escapes. Exported
-// as the one canonical sanitizer so log forwarders and other packages don't
-// hand-roll their own. Returns s unchanged when it contains no ESC.
+// (BEL- or ST-terminated), charset designation, and 2-char ESC escapes,
+// INCLUDING SGR color codes. Use for LLM/text contexts where colors are noise.
+// Exported as the one canonical sanitizer so other packages don't hand-roll
+// their own. Returns s unchanged when it contains no ESC.
 func StripANSI(s string) string {
 	if !strings.ContainsRune(s, '\x1b') {
 		return s
 	}
 	return ansiPattern.ReplaceAllString(s, "")
+}
+
+// controlPattern is ansiPattern minus SGR: its CSI branch excludes the 'm'
+// final byte (0x6d), so color codes survive.
+var controlPattern = regexp.MustCompile(
+	`\x1b\[[0-9;?]*[ -/]*[@-ln-~]` + // CSI with a non-SGR final byte (excludes 'm')
+		`|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)` + // OSC
+		`|\x1b[()*+#][0-9A-Za-z]` + // charset designation
+		`|\x1b[=>78cMDEHNOno<]`) // 2-char escapes
+
+// StripControl removes cursor/OSC/charset/2-char control sequences but KEEPS
+// SGR color codes (\x1b[…m). Use when forwarding logs to a human terminal: the
+// control sequences garble layout, but colors are useful. (StripANSI removes
+// colors too.)
+func StripControl(s string) string {
+	if !strings.ContainsRune(s, '\x1b') {
+		return s
+	}
+	return controlPattern.ReplaceAllString(s, "")
 }
 
 func formatValue(v any) string {

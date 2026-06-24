@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Vet
+        run: go vet ./...
+      - name: Test (core)
+        run: go test ./...
+      - name: Test (rtkcompat)
+        working-directory: rtkcompat
+        run: go test ./...
+
+  rtk-parity:
+    runs-on: ubuntu-latest
+    # Detects drift between upstream rtk's filter catalog and specs/rtk.json.
+    # Non-blocking: rtk moves fast, so a drift here is a "time to re-sync"
+    # signal, not a reason to block unrelated PRs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Check specs/rtk.json against upstream rtk
+        working-directory: rtkcompat
+        run: go run ./cmd/rtksync -check

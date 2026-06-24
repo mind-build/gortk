@@ -39,7 +39,8 @@ type Spec struct {
 
 	JSON      *JSONSpec  `json:"json,omitempty"`
 	Lines     *LineSpec  `json:"lines,omitempty"`
-	Log       *LogSpec   `json:"log,omitempty"` // parse a log stream into levelled Records
+	Group     *GroupSpec `json:"group,omitempty"` // collapse surviving lines by a captured key
+	Log       *LogSpec   `json:"log,omitempty"`   // parse a log stream into levelled Records
 	Limit     *LimitSpec `json:"limit,omitempty"`
 	EmptyText string     `json:"empty_text,omitempty"` // text to emit when nothing survives
 }
@@ -94,6 +95,21 @@ type JSONSpec struct {
 	ArrayField      string `json:"array_field"`   // top-level field holding the array
 	ItemTemplate    string `json:"item_template"` // e.g. "{Pos.Filename}:{Pos.Line} {Text}"
 	SummaryTemplate string `json:"summary_template,omitempty"`
+}
+
+// GroupSpec collapses lines that share a key into one summary line per key —
+// rtk's "grouping" strategy (files by directory, errors by type). It runs after
+// the line stage's drop/keep rules, on whatever survives. A line whose KeyRegex
+// captures group 1 is grouped under that key; a line that doesn't match passes
+// through untouched (so a header or error above a list is preserved).
+//
+// Example — collapse `find` output by directory:
+//
+//	"group": { "key_regex": "^(.*)/[^/]+$", "line": "{key}/ ({count} files)", "examples": 0 }
+type GroupSpec struct {
+	KeyRegex string `json:"key_regex"`          // capture group 1 = the grouping key
+	Line     string `json:"line,omitempty"`     // header template; {key} and {count}. Default "{key} ({count})"
+	Examples int    `json:"examples,omitempty"` // keep up to N example lines under each header (indented). 0 = none
 }
 
 // LimitSpec caps the post-transform size and records the loss.
@@ -156,8 +172,8 @@ func (s Spec) Compile() (Filter, error) {
 	if s.Match.Command == "" && s.Match.CommandRegex == "" {
 		return nil, fmt.Errorf("gortk: spec %q needs match.command or match.command_regex", s.Name)
 	}
-	if s.JSON == nil && s.Lines == nil && s.Log == nil && len(s.MatchOutput) == 0 {
-		return nil, fmt.Errorf("gortk: spec %q has no transform (json, lines, log, or match_output)", s.Name)
+	if s.JSON == nil && s.Lines == nil && s.Group == nil && s.Log == nil && len(s.MatchOutput) == 0 {
+		return nil, fmt.Errorf("gortk: spec %q has no transform (json, lines, group, log, or match_output)", s.Name)
 	}
 	f := &specFilter{spec: s}
 	if s.Match.CommandRegex != "" {
@@ -228,6 +244,19 @@ func (s Spec) Compile() (Filter, error) {
 			f.keepRE = append(f.keepRE, re)
 		}
 	}
+	if s.Group != nil {
+		if s.Group.KeyRegex == "" {
+			return nil, fmt.Errorf("gortk: spec %q group needs key_regex", s.Name)
+		}
+		re, err := regexp.Compile(s.Group.KeyRegex)
+		if err != nil {
+			return nil, fmt.Errorf("gortk: spec %q group key_regex %q: %w", s.Name, s.Group.KeyRegex, err)
+		}
+		if re.NumSubexp() < 1 {
+			return nil, fmt.Errorf("gortk: spec %q group key_regex %q needs a capture group for the key", s.Name, s.Group.KeyRegex)
+		}
+		f.groupRE = re
+	}
 	return f, nil
 }
 
@@ -240,6 +269,7 @@ type specFilter struct {
 	itemTmpl    *template.Template // non-nil when ItemTemplate is a Go template
 	summaryTmpl *template.Template // non-nil when SummaryTemplate is a Go template
 	logParser   *LogParser         // non-nil when the spec has a log block
+	groupRE     *regexp.Regexp     // non-nil when the spec has a group block
 }
 
 type compiledOutRule struct {
@@ -285,7 +315,7 @@ func (f *specFilter) Apply(cmd Command) Result {
 		}
 		// stdout wasn't JSON; fall through to Lines if available.
 	}
-	if f.spec.Lines != nil {
+	if f.spec.Lines != nil || f.groupRE != nil {
 		return f.applyLines(cmd)
 	}
 	return passthrough(cmd)
@@ -366,6 +396,11 @@ func (f *specFilter) jsonArray(stdout []byte) ([]any, bool) {
 
 func (f *specFilter) applyLines(cmd Command) Result {
 	ls := f.spec.Lines
+	if ls == nil {
+		// A group-only spec still runs the line pipeline; an empty LineSpec just
+		// means "no drop/keep rules, default stdout source".
+		ls = &LineSpec{}
+	}
 	raw := lineSource(cmd, ls.Source)
 	lines := strings.Split(raw, "\n")
 	// strings.Split leaves a trailing "" for text ending in \n; drop it so we
@@ -402,6 +437,12 @@ func (f *specFilter) applyLines(cmd Command) Result {
 		havePrev = true
 	}
 
+	if f.groupRE != nil {
+		var groupedDrop int
+		kept, groupedDrop = f.groupLines(kept)
+		dropped += groupedDrop
+	}
+
 	text := strings.Join(kept, "\n")
 	if text == "" && f.spec.EmptyText != "" {
 		text = f.spec.EmptyText
@@ -412,6 +453,63 @@ func (f *specFilter) applyLines(cmd Command) Result {
 	}
 	res.Truncation.dropLines(dropped, "dropped "+itoa(dropped)+" noise line(s)")
 	return f.limit(res)
+}
+
+// groupLines collapses lines sharing a KeyRegex capture into one header line per
+// key (plus up to Examples indented examples). Lines that don't match the key
+// regex pass through unchanged, in order, before the group headers. Returns the
+// new line set and the count of lines folded away.
+func (f *specFilter) groupLines(lines []string) (out []string, dropped int) {
+	g := f.spec.Group
+	type group struct {
+		count    int
+		examples []string
+	}
+	groups := map[string]*group{}
+	var order []string // first-seen order of keys, for stable output
+	var ungrouped []string
+
+	for _, line := range lines {
+		m := f.groupRE.FindStringSubmatch(line)
+		if len(m) < 2 {
+			ungrouped = append(ungrouped, line)
+			continue
+		}
+		key := m[1]
+		gp := groups[key]
+		if gp == nil {
+			gp = &group{}
+			groups[key] = gp
+			order = append(order, key)
+		}
+		gp.count++
+		if gp.count <= g.Examples {
+			gp.examples = append(gp.examples, line)
+		}
+	}
+
+	out = ungrouped
+	for _, key := range order {
+		gp := groups[key]
+		out = append(out, renderGroupLine(g.Line, key, gp.count))
+		for _, ex := range gp.examples {
+			out = append(out, "  "+ex)
+		}
+		// Lines folded into the header (those not shown as examples).
+		dropped += gp.count - len(gp.examples)
+	}
+	return out, dropped
+}
+
+// renderGroupLine fills the group header template's {key} and {count}
+// placeholders. An empty template defaults to "{key} ({count})".
+func renderGroupLine(tmpl, key string, count int) string {
+	if tmpl == "" {
+		tmpl = "{key} ({count})"
+	}
+	tmpl = strings.ReplaceAll(tmpl, "{key}", key)
+	tmpl = strings.ReplaceAll(tmpl, "{count}", itoa(count))
+	return tmpl
 }
 
 func (f *specFilter) dropLine(v string, ls *LineSpec) bool {

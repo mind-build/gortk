@@ -7,8 +7,8 @@ import "strings"
 // gortk is a one-liner regardless of how the command was run.
 
 // CommandFromArgs builds a Command from an argv slice (argv[0] is the program).
-// Use this when you ran the command in exec/argv form, e.g. codefly's
-// ShellExecRequest.Args or RunCommandRequest{Command, Args}.
+// Use this when you ran the command in exec/argv form, e.g. an exec-style
+// request carrying a command name and its arguments.
 func CommandFromArgs(argv []string, stdout, stderr []byte, exitCode int) Command {
 	c := Command{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}
 	if len(argv) > 0 {

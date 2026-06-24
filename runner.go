@@ -32,11 +32,11 @@ func Run(ctx context.Context, inv Invocation) (Command, Result, error) {
 //
 //   - run without parsing (use a Runner alone),
 //   - parse without running (feed a Command from recorded fixtures or from a
-//     host executor like codefly's shellExec), or
+//     host's own executor), or
 //   - compose both via an optional Session.
 
-// DefaultMaxCaptureBytes bounds each captured stream in ExecRunner. It matches
-// codefly's shellExec cap so behavior is consistent if you swap runners.
+// DefaultMaxCaptureBytes bounds each captured stream in ExecRunner. It matches a
+// common 2 MiB host-executor cap so behavior is consistent if you swap runners.
 const DefaultMaxCaptureBytes = 2 << 20 // 2 MiB per stream
 
 // Invocation describes a command to run — the pure input description, with no
@@ -53,9 +53,9 @@ type Invocation struct {
 // Runner executes an Invocation and returns the captured output as a Command.
 //
 // A Runner MUST NOT compress or interpret output — that is the Registry's job.
-// This is the extension point hosts implement over their own executor: codefly
-// wraps its sanctioned shellExec RPC as a Runner; ExecRunner is the standalone
-// os/exec implementation used by the CLI.
+// This is the extension point a host implements over its own executor (a
+// hardened or sandboxed exec RPC, say); ExecRunner is the standalone os/exec
+// implementation used by the CLI.
 type Runner interface {
 	Run(ctx context.Context, inv Invocation) (Command, error)
 }

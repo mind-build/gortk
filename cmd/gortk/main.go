@@ -1,9 +1,9 @@
 // Command gortk is an OPTIONAL developer/debug tool for the gortk package.
 //
-// It is NOT the integration path for codefly — codefly runs commands in-process
-// and should call the gortk library directly (see INTEGRATION.md). This binary
-// exists to iterate on filters from a terminal and to let non-Go callers pipe
-// output through gortk.
+// It is NOT the intended production integration path — a host runtime that runs
+// commands in-process should call the gortk library directly (see
+// INTEGRATION.md). This binary exists to iterate on filters from a terminal and
+// to let non-Go callers pipe output through gortk.
 //
 // Usage:
 //
@@ -40,7 +40,7 @@ func run(argv []string) error {
 	if len(argv) == 0 {
 		return usage()
 	}
-	specsPath := ""
+	var opts regOpts
 	stream := false
 	// A tiny manual parse so flags can appear before the subcommand.
 	var rest []string
@@ -50,8 +50,23 @@ func run(argv []string) error {
 			if i+1 >= len(argv) {
 				return fmt.Errorf("--specs needs a file")
 			}
-			specsPath = argv[i+1]
+			opts.specsPath = argv[i+1]
 			i++
+		case "--tee":
+			if i+1 >= len(argv) {
+				return fmt.Errorf("--tee needs a directory")
+			}
+			opts.teeDir = argv[i+1]
+			i++
+		case "-u", "--ultra":
+			opts.ultra = true
+		case "--redact":
+			opts.redact = true
+		case "--redact-entropy":
+			opts.redact = true
+			opts.redactEntropy = true
+		case "--normalize":
+			opts.normalize = true
 		case "--stream":
 			stream = true
 		case "-h", "--help":
@@ -64,7 +79,7 @@ func run(argv []string) error {
 		return usage()
 	}
 
-	reg, err := registry(specsPath)
+	reg, err := registry(opts)
 	if err != nil {
 		return err
 	}
@@ -75,10 +90,20 @@ func run(argv []string) error {
 	case "run":
 		return cmdRun(reg, rest[1:], stream)
 	case "specs":
-		return cmdSpecs(specsPath)
+		return cmdSpecs(opts.specsPath)
 	default:
 		return fmt.Errorf("unknown subcommand %q (try: filter, run, specs)", rest[0])
 	}
+}
+
+// regOpts holds the registry-shaping flags shared by the subcommands.
+type regOpts struct {
+	specsPath     string // --specs FILE: extra JSON specs layered on the defaults
+	teeDir        string // --tee DIR: persist full output of lossy results here
+	ultra         bool   // -u/--ultra: collapse blank lines in the output
+	redact        bool   // --redact: mask credentials
+	redactEntropy bool   // --redact-entropy: also redact high-entropy tokens
+	normalize     bool   // --normalize: collapse UUIDs/timestamps/hashes/IPs
 }
 
 // cmdFilter reads stdin and compresses it as if it were the output of the
@@ -152,19 +177,34 @@ func cmdSpecs(specsPath string) error {
 	return nil
 }
 
-func registry(specsPath string) (*gortk.Registry, error) {
+func registry(opts regOpts) (*gortk.Registry, error) {
 	reg := gortk.Default()
-	if specsPath == "" {
-		return reg, nil
-	}
-	specs, err := loadSpecFile(specsPath)
-	if err != nil {
-		return nil, err
-	}
-	for _, s := range specs {
-		if err := reg.RegisterSpec(s); err != nil {
-			return nil, fmt.Errorf("spec %q: %w", s.Name, err)
+	if opts.specsPath != "" {
+		specs, err := loadSpecFile(opts.specsPath)
+		if err != nil {
+			return nil, err
 		}
+		for _, s := range specs {
+			if err := reg.RegisterSpec(s); err != nil {
+				return nil, fmt.Errorf("spec %q: %w", s.Name, err)
+			}
+		}
+	}
+	if opts.ultra {
+		reg = reg.WithCompact()
+	}
+	if opts.redact {
+		r, err := reg.WithRedactionOptions(gortk.RedactOptions{Entropy: opts.redactEntropy})
+		if err != nil {
+			return nil, err
+		}
+		reg = r
+	}
+	if opts.normalize {
+		reg = reg.WithNormalize()
+	}
+	if opts.teeDir != "" {
+		reg = reg.WithSink(gortk.FileSink{Dir: opts.teeDir})
 	}
 	return reg, nil
 }
@@ -177,10 +217,25 @@ func loadSpecFile(path string) ([]gortk.Spec, error) {
 	return gortk.LoadSpecs(data)
 }
 
-// report prints a one-line loss note to stderr so stdout stays clean for piping.
+// report prints a one-line gain/loss note to stderr so stdout stays clean for
+// piping. It mirrors rtk's "gain" (savings %) and surfaces the recovery handle
+// (rtk's tee) plus a discover hint when nothing matched.
 func report(res gortk.Result) {
+	if res.InputBytes > 0 {
+		fmt.Fprintf(os.Stderr, "[gortk %s] %d -> %d bytes (%d%% saved)\n",
+			res.Filter, res.InputBytes, res.OutputBytes, int(res.SavedFraction()*100+0.5))
+	}
 	if !res.Lossless() {
-		fmt.Fprintf(os.Stderr, "[gortk %s] %s\n", res.Filter, res.Truncation.Note)
+		fmt.Fprintf(os.Stderr, "  %s\n", res.Truncation.Note)
+		if res.Truncation.FullRef != "" {
+			fmt.Fprintf(os.Stderr, "  full output: %s\n", res.Truncation.FullRef)
+		}
+	}
+	if res.Truncation.Masked > 0 {
+		fmt.Fprintf(os.Stderr, "  masked %d span(s) (redaction/normalization)\n", res.Truncation.Masked)
+	}
+	if res.Filter == "passthrough" {
+		fmt.Fprintln(os.Stderr, "  (no dedicated filter — candidate for one; see `gortk specs`)")
 	}
 }
 
@@ -192,7 +247,14 @@ usage:
   gortk run -- <cmd...>              run <cmd> and compress its output
   gortk run --stream -- <cmd...>     stream lines live, compress at the end
   gortk specs                        list active filters
+
+flags (before the subcommand):
   --specs FILE                       layer extra JSON specs on the defaults
+  --tee DIR                          save full output of lossy results to DIR
+  -u, --ultra                        ultra-compact: collapse blank lines
+  --redact                           mask credentials (cloud keys, tokens, …)
+  --redact-entropy                   also mask high-entropy tokens (aggressive)
+  --normalize                        collapse UUIDs/timestamps/hashes/IPs
 `)
 	return nil
 }

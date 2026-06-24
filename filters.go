@@ -16,8 +16,8 @@ func itoa(n int) string { return strconv.Itoa(n) }
 // ---------------------------------------------------------------------------
 
 // GoTest compresses `go test` output. It prefers the structured `-json` stream
-// (the same source codefly's golang runner parses) and falls back to scanning
-// plain text. It keeps failures, build errors, and the final summary; it drops
+// (the same structured source a Go test runner consumes) and falls back to
+// scanning plain text. It keeps failures, build errors, and the final summary; it drops
 // per-package "ok" lines and "=== RUN"/"--- PASS" chatter, which dominate the
 // byte count on a green run.
 type GoTest struct{}
